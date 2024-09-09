@@ -4,179 +4,181 @@ using System.IO;
 using System.Text;
 using JetBrains.Annotations;
 
-namespace fNbt {
-    /// <summary> BinaryReader wrapper that takes care of reading primitives from an NBT stream,
-    /// while taking care of endianness, string encoding, and skipping. </summary>
-    internal sealed class NbtBinaryReader : BinaryReader {
-        readonly byte[] buffer = new byte[sizeof(double)];
+namespace fNbt;
 
-        byte[] seekBuffer;
-        const int SeekBufferSize = 8 * 1024;
-        readonly bool swapNeeded;
-        readonly byte[] stringConversionBuffer = new byte[64];
+/// <summary>
+///     BinaryReader wrapper that takes care of reading primitives from an NBT stream,
+///     while taking care of endianness, string encoding, and skipping.
+/// </summary>
+internal sealed class NbtBinaryReader([NotNull] Stream input, bool bigEndian) : BinaryReader(input)
+{
+    private const int SeekBufferSize = 8 * 1024;
+    private readonly byte[] _buffer = new byte[sizeof(double)];
+    private readonly byte[] _stringConversionBuffer = new byte[64];
+    private readonly bool _swapNeeded = BitConverter.IsLittleEndian == bigEndian;
+    private byte[] _seekBuffer;
 
 
-        public NbtBinaryReader([NotNull] Stream input, bool bigEndian)
-            : base(input) {
-            swapNeeded = (BitConverter.IsLittleEndian == bigEndian);
+    [CanBeNull] public TagSelector Selector { get; set; }
+
+    public NbtTagType ReadTagType()
+    {
+        int type = ReadByte();
+        if (type < 0)
+            throw new EndOfStreamException();
+        if (type > (int)NbtTagType.LongArray) throw new NbtFormatException("NBT tag type out of range: " + type);
+        return (NbtTagType)type;
+    }
+
+
+    public override short ReadInt16()
+    {
+        if (_swapNeeded)
+            return Swap(base.ReadInt16());
+        return base.ReadInt16();
+    }
+
+
+    public override int ReadInt32()
+    {
+        if (_swapNeeded)
+            return Swap(base.ReadInt32());
+        return base.ReadInt32();
+    }
+
+
+    public override long ReadInt64()
+    {
+        if (_swapNeeded)
+            return Swap(base.ReadInt64());
+        return base.ReadInt64();
+    }
+
+
+    public override float ReadSingle()
+    {
+        if (_swapNeeded)
+        {
+            FillBuffer(sizeof(float));
+            Array.Reverse(_buffer, 0, sizeof(float));
+            return BitConverter.ToSingle(_buffer, 0);
         }
 
+        return base.ReadSingle();
+    }
 
-        public NbtTagType ReadTagType() {
-            int type = ReadByte();
-            if (type < 0) {
-                throw new EndOfStreamException();
-            } else if (type > (int)NbtTagType.LongArray) {
-                throw new NbtFormatException("NBT tag type out of range: " + type);
+
+    public override double ReadDouble()
+    {
+        if (_swapNeeded)
+        {
+            FillBuffer(sizeof(double));
+            Array.Reverse(_buffer);
+            return BitConverter.ToDouble(_buffer, 0);
+        }
+
+        return base.ReadDouble();
+    }
+
+
+    public override string ReadString()
+    {
+        var length = ReadInt16();
+        if (length < 0) throw new NbtFormatException("Negative string length given!");
+        if (length < _stringConversionBuffer.Length)
+        {
+            var stringBytesRead = 0;
+            while (stringBytesRead < length)
+            {
+                var bytesToRead = length - stringBytesRead;
+                var bytesReadThisTime = BaseStream.Read(_stringConversionBuffer, stringBytesRead, bytesToRead);
+                if (bytesReadThisTime == 0) throw new EndOfStreamException();
+                stringBytesRead += bytesReadThisTime;
             }
-            return (NbtTagType)type;
+
+            return Encoding.UTF8.GetString(_stringConversionBuffer, 0, length);
         }
 
+        var stringData = ReadBytes(length);
+        if (stringData.Length < length) throw new EndOfStreamException();
+        return Encoding.UTF8.GetString(stringData);
+    }
 
-        public override short ReadInt16() {
-            if (swapNeeded) {
-                return Swap(base.ReadInt16());
-            } else {
-                return base.ReadInt16();
-            }
+
+    public void Skip(int bytesToSkip)
+    {
+        if (bytesToSkip < 0) throw new ArgumentOutOfRangeException(nameof(bytesToSkip));
+
+        if (BaseStream.CanSeek)
+        {
+            BaseStream.Position += bytesToSkip;
         }
-
-
-        public override int ReadInt32() {
-            if (swapNeeded) {
-                return Swap(base.ReadInt32());
-            } else {
-                return base.ReadInt32();
-            }
-        }
-
-
-        public override long ReadInt64() {
-            if (swapNeeded) {
-                return Swap(base.ReadInt64());
-            } else {
-                return base.ReadInt64();
-            }
-        }
-
-
-        public override float ReadSingle() {
-            if (swapNeeded) {
-                FillBuffer(sizeof(float));
-                Array.Reverse(buffer, 0, sizeof(float));
-                return BitConverter.ToSingle(buffer, 0);
-            } else {
-                return base.ReadSingle();
-            }
-        }
-
-
-        public override double ReadDouble() {
-            if (swapNeeded) {
-                FillBuffer(sizeof(double));
-                Array.Reverse(buffer);
-                return BitConverter.ToDouble(buffer, 0);
-            }
-            return base.ReadDouble();
-        }
-
-
-        public override string ReadString() {
-            short length = ReadInt16();
-            if (length < 0) {
-                throw new NbtFormatException("Negative string length given!");
-            }
-            if (length < stringConversionBuffer.Length) {
-                int stringBytesRead = 0;
-                while (stringBytesRead < length) {
-                    int bytesToRead = length - stringBytesRead;
-                    int bytesReadThisTime = BaseStream.Read(stringConversionBuffer, stringBytesRead, bytesToRead);
-                    if (bytesReadThisTime == 0) {
-                        throw new EndOfStreamException();
-                    }
-                    stringBytesRead += bytesReadThisTime;
-                }
-                return Encoding.UTF8.GetString(stringConversionBuffer, 0, length);
-            } else {
-                byte[] stringData = ReadBytes(length);
-                if (stringData.Length < length) {
-                    throw new EndOfStreamException();
-                }
-                return Encoding.UTF8.GetString(stringData);
-            }
-        }
-
-
-        public void Skip(int bytesToSkip) {
-            if (bytesToSkip < 0) {
-                throw new ArgumentOutOfRangeException(nameof(bytesToSkip));
-            } else if (BaseStream.CanSeek) {
-                BaseStream.Position += bytesToSkip;
-            } else if (bytesToSkip != 0) {
-                if (seekBuffer == null) seekBuffer = new byte[SeekBufferSize];
-                int bytesSkipped = 0;
-                while (bytesSkipped < bytesToSkip) {
-                    int bytesToRead = Math.Min(SeekBufferSize, bytesToSkip - bytesSkipped);
-                    int bytesReadThisTime = BaseStream.Read(seekBuffer, 0, bytesToRead);
-                    if (bytesReadThisTime == 0) {
-                        throw new EndOfStreamException();
-                    }
-                    bytesSkipped += bytesReadThisTime;
-                }
-            }
-        }
-
-
-        new void FillBuffer(int numBytes) {
-            int offset = 0;
-            do {
-                int num = BaseStream.Read(buffer, offset, numBytes - offset);
-                if (num == 0) throw new EndOfStreamException();
-                offset += num;
-            } while (offset < numBytes);
-        }
-
-
-        public void SkipString() {
-            short length = ReadInt16();
-            if (length < 0) {
-                throw new NbtFormatException("Negative string length given!");
-            }
-            Skip(length);
-        }
-
-
-        [DebuggerStepThrough]
-        static short Swap(short v) {
-            unchecked {
-                return (short)((v >> 8) & 0x00FF |
-                               (v << 8) & 0xFF00);
+        else if (bytesToSkip != 0)
+        {
+            _seekBuffer ??= new byte[SeekBufferSize];
+            var bytesSkipped = 0;
+            while (bytesSkipped < bytesToSkip)
+            {
+                var bytesToRead = Math.Min(SeekBufferSize, bytesToSkip - bytesSkipped);
+                var bytesReadThisTime = BaseStream.Read(_seekBuffer, 0, bytesToRead);
+                if (bytesReadThisTime == 0) throw new EndOfStreamException();
+                bytesSkipped += bytesReadThisTime;
             }
         }
+    }
+
+    private new void FillBuffer(int numBytes)
+    {
+        var offset = 0;
+        do
+        {
+            var num = BaseStream.Read(_buffer, offset, numBytes - offset);
+            if (num == 0) throw new EndOfStreamException();
+            offset += num;
+        } while (offset < numBytes);
+    }
 
 
-        [DebuggerStepThrough]
-        static int Swap(int v) {
-            unchecked {
-                var v2 = (uint)v;
-                return (int)((v2 >> 24) & 0x000000FF |
-                             (v2 >> 8) & 0x0000FF00 |
-                             (v2 << 8) & 0x00FF0000 |
-                             (v2 << 24) & 0xFF000000);
-            }
+    public void SkipString()
+    {
+        var length = ReadInt16();
+        if (length < 0) throw new NbtFormatException("Negative string length given!");
+        Skip(length);
+    }
+
+
+    [DebuggerStepThrough]
+    private static short Swap(short v)
+    {
+        unchecked
+        {
+            return (short)(((v >> 8) & 0x00FF) |
+                           ((v << 8) & 0xFF00));
         }
+    }
 
 
-        [DebuggerStepThrough]
-        static long Swap(long v) {
-            unchecked {
-                return (Swap((int)v) & uint.MaxValue) << 32 |
-                       Swap((int)(v >> 32)) & uint.MaxValue;
-            }
+    [DebuggerStepThrough]
+    private static int Swap(int v)
+    {
+        unchecked
+        {
+            var v2 = (uint)v;
+            return (int)(((v2 >> 24) & 0x000000FF) |
+                         ((v2 >> 8) & 0x0000FF00) |
+                         ((v2 << 8) & 0x00FF0000) |
+                         ((v2 << 24) & 0xFF000000));
         }
+    }
 
 
-        [CanBeNull]
-        public TagSelector Selector { get; set; }
+    [DebuggerStepThrough]
+    private static long Swap(long v)
+    {
+        unchecked
+        {
+            return ((Swap((int)v) & uint.MaxValue) << 32) |
+                   (Swap((int)(v >> 32)) & uint.MaxValue);
+        }
     }
 }
